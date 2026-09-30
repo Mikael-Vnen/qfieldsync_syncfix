@@ -22,9 +22,12 @@ import shutil
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
+import gc
+import sys
 
+from qgis.PyQt.QtCore import QTimer
 from libqfieldsync.utils.file_utils import copy_multifile
-from qgis.core import Qgis, QgsMessageLog
+from qgis.core import Qgis, QgsMessageLog, QgsProject
 from qgis.PyQt.QtCore import (
     QAbstractListModel,
     QModelIndex,
@@ -32,7 +35,9 @@ from qgis.PyQt.QtCore import (
     Qt,
     QUrl,
     pyqtSignal,
+    QTimer,
 )
+
 from qgis.PyQt.QtNetwork import QNetworkReply
 
 from qfieldsync.core.cloud_api import CloudNetworkAccessManager
@@ -326,6 +331,10 @@ class CloudTransferrer(QObject):
         self.is_delete_active = False
         self._download()
 
+    """ 
+    Original download function was causing issues wiht qfieldsync. Project files were not updated due to the connection not closing properly.
+    New one (below) fixes this issue.
+
     def _on_download_finished(self) -> None:
         if not self.import_qfield_project():
             QgsMessageLog.logMessage(
@@ -339,6 +348,51 @@ class CloudTransferrer(QObject):
 
         if not self.is_project_list_update_active:
             self.finished.emit()
+    """
+
+    def _on_download_finished(self) -> None:
+        """ 
+        New custom download function, used to handle the current sync error when syncing projects from QFieldCloud to QGIS 
+        """
+
+        project_filename = QgsProject.instance().fileName()
+
+        # Sync has atleast one .gpkg file
+        has_gpkg_download = any(
+            str(project_file.path).lower().endswith(".gpkg")
+            for project_file in self._files_to_download.values()
+        )
+        
+        # Check that the currently open project is the same as being synced
+        # Trying to use self.cloud_project.is_current_qgis_project did not work
+        # Paths are compared as strings leading to false negatives, comparing Path() objects is more reliable.
+        is_current_project = (
+            bool(project_filename)
+            and bool(self.cloud_project.local_dir)
+            and Path(project_filename).resolve().parent == Path(self.cloud_project.local_dir).resolve()
+        )
+
+        # Fix for the sync issue. Only run if the project synced is currently opened and sync affects .gpkg files.  
+        if is_current_project and has_gpkg_download:
+            project = QgsProject.instance()
+            project_filename = project.fileName()
+
+            # Clears active dataset connections/handles, which was preventing file overwrites.
+            project.clear()
+
+            # Manual garbage collection since there could be Python objects what *might* still cause issues.
+            gc.collect()
+
+            # Wait for 2500ms seconds to ensure Windows file handles are released.
+            delay = 2500 if sys.platform == "win32" else 0
+
+            QTimer.singleShot(
+                delay,
+                lambda: self._import_downloaded_project(project_filename),
+            )
+            return
+
+        self._import_downloaded_project(None)
 
     def _update_project_files_list(self) -> None:
         self.is_project_list_update_active = True
@@ -445,6 +499,24 @@ class CloudTransferrer(QObject):
                 )
 
         return False
+
+    def _import_downloaded_project(self, project_filename) -> None:
+        if not self.import_qfield_project():
+            QgsMessageLog.logMessage(
+                self.tr("Failed to copy project files to the project directory!"),
+                "QFieldSync",
+                Qgis.MessageLevel.Critical,
+            )
+
+        # Read project file again if project.clear() was called in _on_download_finished()
+        if project_filename:
+            QgsProject.instance().read(project_filename)
+
+        self.is_download_active = False
+        self.is_finished = True
+
+        if not self.is_project_list_update_active:
+            self.finished.emit()
 
     def _on_logout_success(self) -> None:
         self.abort_requests()
