@@ -1,3 +1,52 @@
+# Issue
+
+On Windows, QFieldSync fails to apply downloaded QFieldCloud changes to the currently open QGIS project after a GeoPackage layer has been edited.
+
+The cloud download succeeds, but QGIS keeps an open OGR/SQLite handle to the edited .gpkg file. QFieldSync then fails to replace that file in the project directory because Windows does not allow the active GeoPackage to be overwritten while the file handle is active.
+
+This results in error message: 
+CRITICAL Failed to copy project files to the project directory!
+
+The downloaded GeoPackage is up to date, but the active project continues using the stale local copy.
+
+# Fix
+
+Before overwriting the GeoPackages QFieldSync now:
+
+Stores the current QGIS project filename.
+
+Clears the current QgsProject to release active layer/provider handles.
+
+Waits briefly on Windows to allow the GeoPackage file handles to be fully released.
+
+Copies the downloaded files into the project directory.
+
+Reopens the original QGIS project.
+
+The current-project detection was also changed to compare the normalized directory of the loaded project file against the QFieldCloud project's local directory. This proved more reliable than the existing is_current_qgis_project check based on QgsProject.homePath().
+
+File(s)
+qfieldsync/core/cloud_transferrer.py
+
+# Changed lines:
+
+Imports
+25, 26, 28, 38
+
+New functions
+353 _on_download_finished()
+503 _import_downloaded_poject()
+
+
+Result
+
+After the change, GeoPackage updates downloaded from QFieldCloud can be applied successfully even when the affected layers have previously been edited in the current QGIS session. Bidirectional synchronization works without requiring the user to close QGIS or manually re-download the project.
+
+
+
+
+# \/ Original QFieldSync readme text \/
+
 [![Read the documentation](https://img.shields.io/badge/Read-the%20docs-green.svg)](https://docs.qfield.org/get-started/)
 [![Release](https://img.shields.io/github/release/opengisch/QFieldSync.svg)](https://github.com/opengisch/QFieldSync/releases)
 [![Build Status](https://travis-ci.org/opengisch/qfieldsync.svg?branch=master)](https://travis-ci.org/opengisch/qfieldsync)
